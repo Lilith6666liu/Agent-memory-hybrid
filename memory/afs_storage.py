@@ -1,19 +1,37 @@
 # memory/afs_storage.py
 import uuid
+import sqlite3
 from datetime import datetime
-from typing import List
-from .models import AgenticFileSystem, CandidateMemory, MemoryItem
+from typing import List, Dict
+from .models import CandidateMemory
 
 class MemoryManager:
     """
-    阶段 3：长期记忆与睡眠后台管理器 (融合 OpenViking 与 LightMem)
-    负责：将 Candidate 落盘到 AFS，处理冲突，管理版本演化。
+    阶段 3：长期记忆与 SQLite 持久化存储 (融合 OpenViking 与 LightMem)
+    负责：将 Candidate 落盘到 SQLite 数据库，处理冲突，管理版本演化。
     """
     
-    def __init__(self):
-        self.afs = AgenticFileSystem()
-        self.candidate_queue: List[CandidateMemory] = [] # 模拟后台队列
+    def __init__(self, db_path: str = "agent_memory.db"):
+        # 连接本地数据库：这相当于 OpenViking 架构中的落盘操作准备
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        self._create_table()
+        self.candidate_queue: List[CandidateMemory] = [] # 依然保留作为白天的内存暂存队列
         
+    def _create_table(self):
+        """编写 SQL 创建名为 afs_memory 的表（如果不存在）"""
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS afs_memory (
+                id TEXT PRIMARY KEY,
+                drawer TEXT,
+                content TEXT,
+                status TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            )
+        ''')
+        self.conn.commit()
+
     def enqueue_candidate(self, candidate: CandidateMemory) -> None:
         """
         白天（实时对话中）：仅做轻量级入队，不阻塞主流程。
@@ -24,39 +42,60 @@ class MemoryManager:
     def run_sleep_update(self) -> None:
         """
         夜间/空闲时：触发睡眠任务，批量处理候选队列。
-        这里模拟了知识图谱/大模型在后台进行实体对齐和冲突消解的过程（OpenViking 的版本演化思想）。
+        这里模拟了在后台进行实体对齐和冲突消解的过程（OpenViking 的版本演化思想）。
         """
-        now = datetime.now()
+        now = datetime.now().isoformat()
+        cursor = self.conn.cursor()
         
         for candidate in self.candidate_queue:
-            # 1. 映射抽屉：根据 target_drawer 找到 AFS 中对应的列表
-            # 使用 getattr 动态获取属性（如 'preferences' -> self.afs.preferences）
             drawer_name = candidate.target_drawer
-            if not hasattr(self.afs, drawer_name):
-                continue
             
-            drawer_list: List[MemoryItem] = getattr(self.afs, drawer_name)
-            
-            # 2. 模拟冲突检测 (以 '寿司' 为例进行实体对齐)
-            # 这里模拟了后台扫描现有记忆，判断新旧知识是否冲突
-            for item in drawer_list:
-                if item.status == 'active':
-                    # 教学演示：如果新旧内容都包含 "寿司"，则判定为偏好更新（发生冲突）
-                    if "寿司" in candidate.content and "寿司" in item.content:
-                        # 3. 版本演化处理：一旦发现冲突，标记旧记录为 deprecated
-                        # 体现了 Append-only 的数据审计思想，不直接删除旧数据
-                        item.status = 'deprecated'
-                        item.updated_at = now
-            
-            # 4. 创建并插入新记忆
-            new_item = MemoryItem(
-                item_id=str(uuid.uuid4()),
-                content=candidate.content,
-                status='active',
-                created_at=now,
-                updated_at=now
+            # 1. 模拟冲突检测 (SQL 版)：根据 candidate 的 target_drawer，在数据库中 SELECT 出该抽屉下所有 status='active' 的记录
+            cursor.execute(
+                "SELECT id, content FROM afs_memory WHERE drawer = ? AND status = 'active'", 
+                (drawer_name,)
             )
-            drawer_list.append(new_item)
+            active_items = cursor.fetchall()
             
-        # 5. 处理完队列后清空
+            # 2. 判定冲突（教学演示逻辑：如果旧内容包含 "寿司"，则判定为偏好更新）
+            for item_id, item_content in active_items:
+                if "寿司" in candidate.content and "寿司" in item_content:
+                    # 3. 版本演化（SQL 版）：执行 UPDATE 语句，将旧记录标记为 deprecated
+                    # 这体现了 Append-only 的数据审计思想，记录版本演化轨迹
+                    cursor.execute(
+                        "UPDATE afs_memory SET status = 'deprecated', updated_at = ? WHERE id = ?",
+                        (now, item_id)
+                    )
+            
+            # 4. 写入新记忆：执行 INSERT 语句，将当前 candidate 生成的新记录写入库中
+            new_id = str(uuid.uuid4())
+            cursor.execute(
+                "INSERT INTO afs_memory (id, drawer, content, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (new_id, drawer_name, candidate.content, 'active', now, now)
+            )
+            
+        # 5. 遍历完成后，执行 commit，并清空队列
+        self.conn.commit()
         self.candidate_queue.clear()
+
+    def print_active_memories(self) -> None:
+        """
+        执行 SELECT 查询，查出所有 status='active' 的记忆，并按 drawer 分类打印
+        方便观察 SQLite 落盘效果。
+        """
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT drawer, content, created_at FROM afs_memory WHERE status = 'active' ORDER BY drawer")
+        results = cursor.fetchall()
+
+        if not results:
+            print("\n[AFS SQLite] 目前没有活跃的长期记忆。")
+            return
+
+        print(f"\n{'='*20} AFS 活跃记忆 (SQLite 持久化) {'='*20}")
+        current_drawer = None
+        for drawer, content, created_at in results:
+            if drawer != current_drawer:
+                print(f"\n📂 Drawer: [{drawer}]")
+                current_drawer = drawer
+            print(f"  - {content} (记录于: {created_at})")
+        print(f"\n{'='*60}")

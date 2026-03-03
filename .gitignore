@@ -96,8 +96,12 @@ ipython_config.py
 #   Similar to Pipfile.lock, it is generally recommended to include poetry.lock in version control.
 # poetry.lock
 
-# pdm
-#   Similar to Pipfile.lock, it is generally recommended to include pdm.lock in version control.
+# SQLite databases
+*.db
+*.db-journal
+
+# Environment variables
+.env
 # pdm.lock
 
 # PEP 582; used by e.g. github.com/pdm-project/pdm
