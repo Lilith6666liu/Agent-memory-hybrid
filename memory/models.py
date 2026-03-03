@@ -1,67 +1,94 @@
 # memory/models.py
+"""
+Core data models for the Agent Memory Hybrid system.
+
+Four-layer architecture:
+  History → Scratchpad (STM) → Candidate → Memory (LTM/AFS)
+"""
 from dataclasses import dataclass, field
 from typing import List, Optional
 from datetime import datetime
+from enum import Enum
+
 
 # ==========================================
-# 基础消息层 (History)
+# Enums
+# ==========================================
+class MemoryStatus(str, Enum):
+    ACTIVE = "active"
+    DEPRECATED = "deprecated"
+
+
+class DrawerType(str, Enum):
+    """AFS drawer categories (extensible)."""
+    PROFILE = "profile"           # Who the user is
+    PREFERENCES = "preferences"   # What the user likes
+    ENTITIES = "entities"         # People / things mentioned often
+    EVENTS = "events"             # Key events
+    CASES = "cases"               # Typical cases (agent-side)
+    PATTERNS = "patterns"         # Reusable patterns (agent-side)
+
+
+# ==========================================
+# History Layer
 # ==========================================
 @dataclass
 class Message:
-    """原始对话消息 (History)"""
-    role: str          # 'user' 或 'assistant'
-    content: str       # 消息文本
-    msg_id: str        # 唯一消息ID
-    timestamp: datetime = field(default_factory=datetime.now) # 发生时间
-    is_meaningful: bool = True # 是否有意义（用于入口过滤标记）
+    """A single raw conversation message."""
+    role: str               # 'user' or 'assistant'
+    content: str            # message text
+    msg_id: str             # unique id
+    timestamp: datetime = field(default_factory=datetime.now)
+    is_meaningful: bool = True
+
 
 # ==========================================
-# 状态机中间层 (Scratchpad & Candidate)
+# Scratchpad Layer (Short-Term Memory)
 # ==========================================
 @dataclass
 class ShortTermMemory:
-    """短期工作记忆条目 (Scratchpad)
-    将多轮相关的对话聚合成一个上下文块，避免碎片化。
-    参考: LightMem 的 Working Memory 概念
+    """An aggregated context block produced by the Scratchpad.
+
+    Inspired by LightMem's Working Memory concept — bundle related
+    messages into a coherent chunk to avoid fragmentation.
     """
-    topic: str              # 聚合的话题，例如 "餐厅偏好"
-    summary: str            # 对话摘要
-    source_msg_ids: List[str] # 来源消息ID列表，方便追溯
+    topic: str                      # extracted topic, e.g. "restaurant preference"
+    summary: str                    # condensed summary
+    source_msg_ids: List[str]       # traceable source messages
     created_at: datetime = field(default_factory=datetime.now)
 
-@dataclass
-class CandidateMemory:
-    """候选记忆条目 (Candidate)
-    经过评估，认为“有长期复用价值”的信息，等待进入 AFS。
-    """
-    content: str            # 提取出的核心知识，如 "用户喜欢吃滨寿司"
-    target_drawer: str      # 拟归属的 AFS 抽屉，如 "Preferences"
-    confidence: float       # 置信度 (0-1)，用于后续决策
-    source_stm: ShortTermMemory # 关联的短期记忆来源
 
 # ==========================================
-# 长期记忆层 (OpenViking AFS Drawers)
+# Candidate Layer
+# ==========================================
+@dataclass
+class CandidateMemory:
+    """A memory candidate that passed LLM evaluation and awaits AFS commit.
+
+    Fields:
+        content:        core knowledge extracted, e.g. "user prefers sushi at Hin"
+        target_drawer:  which AFS drawer it belongs to
+        confidence:     LLM-assigned confidence (0-1)
+        embedding:      dense vector for semantic conflict detection
+        source_stm:     the STM it originated from
+    """
+    content: str
+    target_drawer: str
+    confidence: float
+    source_stm: ShortTermMemory
+    embedding: Optional[List[float]] = None
+
+
+# ==========================================
+# Long-Term Memory Layer (AFS)
 # ==========================================
 @dataclass
 class MemoryItem:
-    """长期记忆的基础单元，支持版本演化"""
+    """A single record in the Agentic File System, with version tracking."""
     item_id: str
-    content: str            # 记忆内容
-    status: str             # 'active' (当前有效), 'deprecated' (已过期/被覆盖)
+    drawer: str
+    content: str
+    status: MemoryStatus
+    embedding: Optional[List[float]]
     created_at: datetime
     updated_at: datetime
-
-@dataclass
-class AgenticFileSystem:
-    """AFS 虚拟文件系统 (参考 OpenViking)
-    把记忆分门别类，避免变成电子垃圾场。
-    """
-    # 用户侧
-    profile: List[MemoryItem] = field(default_factory=list)      # 我是谁
-    preferences: List[MemoryItem] = field(default_factory=list)  # 我偏好什么
-    entities: List[MemoryItem] = field(default_factory=list)     # 我常提到的人/物
-    events: List[MemoryItem] = field(default_factory=list)       # 关键事件
-
-    # Agent侧
-    cases: List[MemoryItem] = field(default_factory=list)        # 典型案例
-    patterns: List[MemoryItem] = field(default_factory=list)     # 可复用的模式规则
